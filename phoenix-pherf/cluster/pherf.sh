@@ -17,7 +17,7 @@
 #  limitations under the License.
 
 source config/env.sh
-HBASE_CLASSPATH=`$HBASE_ROOT/hbase/hbase/bin/hbase classpath`
+HBASE_CLASSPATH=`$HBASE_PATH/bin/hbase classpath`
 
 
 PHERF_HOME=$(cd "`dirname $0`" && pwd)
@@ -28,6 +28,6 @@ for f in $PHERF_HOME/lib/*.jar; do
   CLASSPATH=${CLASSPATH}:$f;
 done
 
-CMD="time $}JAVA_HOME}/bin/java ${REMOTE_DEBUG} -Dapp.home=${PHERF_HOME} ${ENV_PROPS} -Xms512m -Xmx3072m -cp ${CLASSPATH} org.apache.phoenix.pherf.Pherf ${@}"
+CMD="time ${JAVA_HOME}/bin/java ${REMOTE_DEBUG} -Dapp.home=${PHERF_HOME} ${ENV_PROPS} -Xms512m -Xmx3072m -cp ${CLASSPATH} org.apache.phoenix.pherf.Pherf ${@}"
 
 eval $CMD

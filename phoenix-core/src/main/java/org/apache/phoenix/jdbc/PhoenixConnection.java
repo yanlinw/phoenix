@@ -123,7 +123,7 @@ public class PhoenixConnection implements Connection, org.apache.phoenix.jdbc.Jd
     private final Properties info;
     private List<SQLCloseable> statements = new ArrayList<SQLCloseable>();
     private final Map<PDataType<?>, Format> formatters = new HashMap<>();
-    private MutationState mutationState;
+    private final MutationState mutationState;
     private final int mutateBatchSize;
     private final Long scn;
     private boolean isAutoCommit = false;
@@ -137,9 +137,12 @@ public class PhoenixConnection implements Connection, org.apache.phoenix.jdbc.Jd
     private boolean isClosed = false;
     private Sampler<?> sampler;
     private boolean readOnly = false;
-    private Map<String, String> customTracingAnnotations = emptyMap(); 
     private Consistency consistency = Consistency.STRONG;
-
+    private Map<String, String> customTracingAnnotations = emptyMap();
+    private final boolean isRequestLevelMetricsEnabled;
+    private final boolean isDescVarLengthRowKeyUpgrade;
+    
+    
     static {
         Tracing.addTraceMetricsSource();
     }
@@ -150,28 +153,35 @@ public class PhoenixConnection implements Connection, org.apache.phoenix.jdbc.Jd
         return props;
     }
 
-    public PhoenixConnection(PhoenixConnection connection) throws SQLException {
-        this(connection.getQueryServices(), connection.getURL(), connection.getClientInfo(), connection.getMetaDataCache());
+    public PhoenixConnection(PhoenixConnection connection, boolean isDescRowKeyOrderUpgrade) throws SQLException {
+        this(connection.getQueryServices(), connection.getURL(), connection.getClientInfo(), connection.getMetaDataCache(), isDescRowKeyOrderUpgrade);
         this.isAutoCommit = connection.isAutoCommit;
         this.sampler = connection.sampler;
         this.statementExecutionCounter = connection.statementExecutionCounter;
     }
+
+    public PhoenixConnection(PhoenixConnection connection) throws SQLException {
+        this(connection, connection.isDescVarLengthRowKeyUpgrade);
+    }
     
     public PhoenixConnection(PhoenixConnection connection, long scn) throws SQLException {
         this(connection.getQueryServices(), connection, scn);
-        this.sampler = connection.sampler;
-        this.statementExecutionCounter = connection.statementExecutionCounter;
     }
     
     public PhoenixConnection(ConnectionQueryServices services, PhoenixConnection connection, long scn) throws SQLException {
-        this(services, connection.getURL(), newPropsWithSCN(scn,connection.getClientInfo()), connection.getMetaDataCache());
+        this(services, connection.getURL(), newPropsWithSCN(scn,connection.getClientInfo()), connection.getMetaDataCache(), connection.isDescVarLengthRowKeyUpgrade());
         this.isAutoCommit = connection.isAutoCommit;
         this.sampler = connection.sampler;
         this.statementExecutionCounter = connection.statementExecutionCounter;
     }
     
     public PhoenixConnection(ConnectionQueryServices services, String url, Properties info, PMetaData metaData) throws SQLException {
+        this(services, url, info, metaData, false);
+    }
+
+    public PhoenixConnection(ConnectionQueryServices services, String url, Properties info, PMetaData metaData, boolean isDescVarLengthRowKeyUpgrade) throws SQLException {
         this.url = url;
+        this.isDescVarLengthRowKeyUpgrade = isDescVarLengthRowKeyUpgrade;
         // Copy so client cannot change
         this.info = info == null ? new Properties() : PropertiesUtil.deepCopy(info);
         final PName tenantId = JDBCUtil.getTenantId(url, info);
@@ -237,6 +247,7 @@ public class PhoenixConnection implements Connection, org.apache.phoenix.jdbc.Jd
                          ! Objects.equal(tenantId, function.getTenantId()));
             }
         };
+        this.isRequestLevelMetricsEnabled = JDBCUtil.isCollectingRequestLevelMetricsEnabled(url, info, this.services.getProps());
         this.mutationState = newMutationState(maxSize);
         this.metaData = metaData.pruneTables(pruner);
         this.metaData = metaData.pruneFunctions(pruner);
@@ -438,6 +449,7 @@ public class PhoenixConnection implements Connection, org.apache.phoenix.jdbc.Jd
             return;
         }
         try {
+            clearMetrics();
             try {
                 if (traceScope != null) {
                     traceScope.close();
@@ -865,5 +877,33 @@ public class PhoenixConnection implements Connection, org.apache.phoenix.jdbc.Jd
 
     public void setTraceScope(TraceScope traceScope) {
         this.traceScope = traceScope;
+    }
+    
+    public Map<String, Map<String, Long>> getMutationMetrics() {
+        return mutationState.getMutationMetricQueue().aggregate();
+    }
+    
+    public Map<String, Map<String, Long>> getReadMetrics() {
+        return mutationState.getReadMetricQueue() != null ? mutationState.getReadMetricQueue().aggregate() : Collections.<String, Map<String, Long>>emptyMap();
+    }
+    
+    public boolean isRequestLevelMetricsEnabled() {
+        return isRequestLevelMetricsEnabled;
+    }
+    
+    public void clearMetrics() {
+        mutationState.getMutationMetricQueue().clearMetrics();
+        if (mutationState.getReadMetricQueue() != null) {
+            mutationState.getReadMetricQueue().clearMetrics();
+        }
+    }
+
+    /**
+     * Returns true if this connection is being used to upgrade the
+     * data due to PHOENIX-2067 and false otherwise.
+     * @return
+     */
+    public boolean isDescVarLengthRowKeyUpgrade() {
+        return isDescVarLengthRowKeyUpgrade;
     }
 }

@@ -17,6 +17,7 @@
  */
 package org.apache.phoenix.compile;
 
+import static org.apache.phoenix.util.TestUtil.BINARY_NAME;
 import static org.apache.phoenix.util.TestUtil.TEST_PROPERTIES;
 import static org.apache.phoenix.util.TestUtil.assertDegenerate;
 import static org.apache.phoenix.util.TestUtil.assertEmptyScanKey;
@@ -68,8 +69,6 @@ import org.apache.phoenix.util.StringUtil;
 import org.apache.phoenix.util.TestUtil;
 import org.junit.Test;
 
-
-
 public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
     
     private static StatementContext compileStatement(String query) throws SQLException {
@@ -103,6 +102,36 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
         assertNull(scan.getFilter());
         assertArrayEquals(PVarchar.INSTANCE.toBytes(tenantId), scan.getStartRow());
         assertArrayEquals(ByteUtil.nextKey(PVarchar.INSTANCE.toBytes(tenantId)), scan.getStopRow());
+    }
+
+    @Test
+    public void testGetByteBitExpression() throws SQLException {
+        ensureTableCreated(getUrl(), TestUtil.BINARY_NAME);
+        int result = 1;
+        String query = "select * from " + BINARY_NAME + " where GET_BYTE(a_binary, 0)=" + result;
+        Scan scan = compileStatement(query).getScan();
+
+        byte[] tmpBytes, tmpBytes2, tmpBytes3;
+        tmpBytes = PInteger.INSTANCE.toBytes(result);
+        tmpBytes2 = new byte[16];
+        System.arraycopy(tmpBytes, 0, tmpBytes2, 0, tmpBytes.length);
+        tmpBytes = ByteUtil.nextKey(tmpBytes);
+        tmpBytes3 = new byte[16];
+        System.arraycopy(tmpBytes, 0, tmpBytes3, 0, tmpBytes.length);
+        assertArrayEquals(tmpBytes2, scan.getStartRow());
+        assertArrayEquals(tmpBytes3, scan.getStopRow());
+
+        query = "select * from " + BINARY_NAME + " where GET_BIT(a_binary, 0)=" + result;
+        scan = compileStatement(query).getScan();
+
+        tmpBytes = PInteger.INSTANCE.toBytes(result);
+        tmpBytes2 = new byte[16];
+        System.arraycopy(tmpBytes, 0, tmpBytes2, 0, tmpBytes.length);
+        tmpBytes = ByteUtil.nextKey(tmpBytes);
+        tmpBytes3 = new byte[16];
+        System.arraycopy(tmpBytes, 0, tmpBytes3, 0, tmpBytes.length);
+        assertArrayEquals(tmpBytes2, scan.getStartRow());
+        assertArrayEquals(tmpBytes3, scan.getStopRow());
     }
 
     @Test
@@ -673,6 +702,24 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
     public void testLikeExtractAllKeyExpression() throws SQLException {
         String tenantId = "000000000000001";
         String keyPrefix = "002";
+        String query = "select * from atable where organization_id = ? and entity_id  LIKE '" + keyPrefix + "%'";
+        List<Object> binds = Arrays.<Object>asList(tenantId);
+        StatementContext context = compileStatement(query, binds);
+        Scan scan = context.getScan();
+
+        assertNull(scan.getFilter());
+        byte[] startRow = ByteUtil.concat(
+            PVarchar.INSTANCE.toBytes(tenantId),StringUtil.padChar(PVarchar.INSTANCE.toBytes(keyPrefix),15));
+        assertArrayEquals(startRow, scan.getStartRow());
+        byte[] stopRow = ByteUtil.concat(
+            PVarchar.INSTANCE.toBytes(tenantId),StringUtil.padChar(ByteUtil.nextKey(PVarchar.INSTANCE.toBytes(keyPrefix)),15));
+        assertArrayEquals(stopRow, scan.getStopRow());
+    }
+
+    @Test
+    public void testLikeExtractAllKeyExpression2() throws SQLException {
+        String tenantId = "000000000000001";
+        String keyPrefix = "中文";
         String query = "select * from atable where organization_id = ? and entity_id  LIKE '" + keyPrefix + "%'";
         List<Object> binds = Arrays.<Object>asList(tenantId);
         StatementContext context = compileStatement(query, binds);
@@ -1780,6 +1827,26 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
             PChar.INSTANCE.toBytes(entityId2), 15)), k2.getLowerRange());
     }
     
+    
+    @Test
+    public void testRVCInView() throws Exception {
+        Connection conn = DriverManager.getConnection(getUrl());
+        conn.createStatement().execute("CREATE TABLE TEST_TABLE.TEST1 (\n" + 
+                "PK1 CHAR(3) NOT NULL, \n" + 
+                "PK2 CHAR(3) NOT NULL,\n" + 
+                "DATA1 CHAR(10)\n" + 
+                "CONSTRAINT PK PRIMARY KEY (PK1, PK2))");
+        conn.createStatement().execute("CREATE VIEW TEST_TABLE.FOO AS SELECT * FROM TEST_TABLE.TEST1 WHERE PK1 = 'FOO'");
+        String query = "SELECT * FROM TEST_TABLE.FOO WHERE PK2 < '004' AND (PK1,PK2) > ('FOO','002') LIMIT 2";
+        Scan scan = compileStatement(query, Collections.emptyList(), 2).getScan();
+        byte[] startRow = ByteUtil.nextKey(ByteUtil.concat(PChar.INSTANCE.toBytes("FOO"),
+                PVarchar.INSTANCE.toBytes("002")));
+        assertArrayEquals(startRow, scan.getStartRow());
+        byte[] stopRow = ByteUtil.concat(PChar.INSTANCE.toBytes("FOO"),
+                PChar.INSTANCE.toBytes("004"));
+        assertArrayEquals(stopRow, scan.getStopRow());
+    }
+
     private static StatementContext compileStatementTenantSpecific(String tenantId, String query, List<Object> binds) throws Exception {
     	PhoenixConnection pconn = getTenantSpecificConnection("tenantId").unwrap(PhoenixConnection.class);
         PhoenixPreparedStatement pstmt = new PhoenixPreparedStatement(pconn, query);

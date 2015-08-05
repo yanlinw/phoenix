@@ -23,6 +23,7 @@ import static org.apache.phoenix.util.PhoenixRuntime.JDBC_PROTOCOL_TERMINATOR;
 import static org.apache.phoenix.util.PhoenixRuntime.PHOENIX_TEST_DRIVER_URL_PARAM;
 import static org.apache.phoenix.util.TestUtil.ATABLE_NAME;
 import static org.apache.phoenix.util.TestUtil.A_VALUE;
+import static org.apache.phoenix.util.TestUtil.BINARY_NAME;
 import static org.apache.phoenix.util.TestUtil.BTABLE_NAME;
 import static org.apache.phoenix.util.TestUtil.B_VALUE;
 import static org.apache.phoenix.util.TestUtil.CUSTOM_ENTITY_DATA_FULL_NAME;
@@ -115,13 +116,13 @@ import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.IntegrationTestingUtility;
+import org.apache.hadoop.hbase.TableNotEnabledException;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
 import org.apache.hadoop.hbase.coprocessor.RegionServerObserver;
 import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.ipc.PhoenixRpcSchedulerFactory;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
 import org.apache.hadoop.hbase.ipc.controller.ServerRpcControllerFactory;
-import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.LocalIndexMerger;
 import org.apache.hadoop.hbase.regionserver.RSRpcServices;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -458,6 +459,13 @@ public abstract class BaseTest {
                 "    co_item_name varchar " +
                 "   CONSTRAINT pk PRIMARY KEY (item_id, item_name)) " +
                 "   SALT_BUCKETS=4");
+        builder.put(BINARY_NAME,"create table " + BINARY_NAME +
+            "   (a_binary BINARY(16) not null, \n" +
+            "    b_binary BINARY(16), \n" +
+            "    a_varbinary VARBINARY, \n" +
+            "    b_varbinary VARBINARY, \n" +
+            "    CONSTRAINT pk PRIMARY KEY (a_binary)\n" +
+            ") ");
         tableDDLMap = builder.build();
     }
     
@@ -829,6 +837,7 @@ public abstract class BaseTest {
                     logger.info("Table " + fullTableName + " is already deleted.");
                 }
             }
+            rs.close();
             if (lastTenantId != null) {
                 conn.close();
             }
@@ -860,6 +869,7 @@ public abstract class BaseTest {
             logger.info("DROP SEQUENCE STATEMENT: DROP SEQUENCE " + SchemaUtil.getEscapedTableName(rs.getString(2), rs.getString(3)));
             conn.createStatement().execute("DROP SEQUENCE " + SchemaUtil.getEscapedTableName(rs.getString(2), rs.getString(3)));
         }
+        rs.close();
     }
     
     protected static void initSumDoubleValues(byte[][] splits, String url) throws Exception {
@@ -1626,13 +1636,16 @@ public abstract class BaseTest {
      * Disable and drop all the tables except SYSTEM.CATALOG and SYSTEM.SEQUENCE
      */
     private static void disableAndDropNonSystemTables() throws Exception {
+        if (driver == null) return;
         HBaseAdmin admin = driver.getConnectionQueryServices(null, null).getAdmin();
         try {
             HTableDescriptor[] tables = admin.listTables();
             for (HTableDescriptor table : tables) {
                 String schemaName = SchemaUtil.getSchemaNameFromFullName(table.getName());
                 if (!QueryConstants.SYSTEM_SCHEMA_NAME.equals(schemaName)) {
-                    admin.disableTable(table.getName());
+                    try{
+                        admin.disableTable(table.getName());
+                    } catch (TableNotEnabledException ignored){}
                     admin.deleteTable(table.getName());
                 }
             }
@@ -1662,6 +1675,14 @@ public abstract class BaseTest {
         }
         if (results.isEmpty()) return;
         fail("Unable to find " + results + " in " + Arrays.asList(expectedResultsArray));
+    }
+
+    protected void assertValueEqualsResultSet(ResultSet rs, List<Object> expectedResults) throws SQLException {
+        List<List<Object>> nestedExpectedResults = Lists.newArrayListWithExpectedSize(expectedResults.size());
+        for (Object expectedResult : expectedResults) {
+            nestedExpectedResults.add(Arrays.asList(expectedResult));
+        }
+        assertValuesEqualsResultSet(rs, nestedExpectedResults); 
     }
 
     /**

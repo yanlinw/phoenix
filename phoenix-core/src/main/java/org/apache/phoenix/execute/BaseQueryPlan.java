@@ -17,9 +17,6 @@
  */
 package org.apache.phoenix.execute;
 
-import static org.apache.phoenix.compile.OrderByCompiler.OrderBy.FWD_ROW_KEY_ORDER_BY;
-import static org.apache.phoenix.compile.OrderByCompiler.OrderBy.REV_ROW_KEY_ORDER_BY;
-
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -35,6 +32,7 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.io.WritableUtils;
+import org.apache.htrace.TraceScope;
 import org.apache.phoenix.compile.ExplainPlan;
 import org.apache.phoenix.compile.FromCompiler;
 import org.apache.phoenix.compile.GroupByCompiler.GroupBy;
@@ -46,16 +44,16 @@ import org.apache.phoenix.compile.StatementContext;
 import org.apache.phoenix.coprocessor.BaseScannerRegionObserver;
 import org.apache.phoenix.expression.ProjectedColumnExpression;
 import org.apache.phoenix.index.IndexMaintainer;
+import org.apache.phoenix.iterate.DefaultParallelScanGrouper;
 import org.apache.phoenix.iterate.DelegateResultIterator;
 import org.apache.phoenix.iterate.ParallelIteratorFactory;
+import org.apache.phoenix.iterate.ParallelScanGrouper;
 import org.apache.phoenix.iterate.ResultIterator;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.parse.FilterableStatement;
 import org.apache.phoenix.parse.HintNode.Hint;
 import org.apache.phoenix.parse.ParseNodeFactory;
 import org.apache.phoenix.parse.TableName;
-import org.apache.phoenix.query.QueryServices;
-import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.schema.KeyValueSchema;
 import org.apache.phoenix.schema.PColumn;
 import org.apache.phoenix.schema.PName;
@@ -71,7 +69,6 @@ import org.apache.phoenix.util.LogUtil;
 import org.apache.phoenix.util.SQLCloseable;
 import org.apache.phoenix.util.SQLCloseables;
 import org.apache.phoenix.util.ScanUtil;
-import org.apache.htrace.TraceScope;
 
 import com.google.common.collect.Lists;
 
@@ -155,18 +152,28 @@ public abstract class BaseQueryPlan implements QueryPlan {
 //    }
     
     @Override
+    public final ResultIterator iterator(ParallelScanGrouper scanGrouper) throws SQLException {
+        return iterator(Collections.<SQLCloseable>emptyList(), scanGrouper);
+    }
+    
+    @Override
     public final ResultIterator iterator() throws SQLException {
-        return iterator(Collections.<SQLCloseable>emptyList());
+        return iterator(Collections.<SQLCloseable>emptyList(), DefaultParallelScanGrouper.getInstance());
     }
 
-    public final ResultIterator iterator(final List<? extends SQLCloseable> dependencies) throws SQLException {
+    public final ResultIterator iterator(final List<? extends SQLCloseable> dependencies, ParallelScanGrouper scanGrouper) throws SQLException {
         if (context.getScanRanges() == ScanRanges.NOTHING) {
             return ResultIterator.EMPTY_ITERATOR;
+        }
+        
+        if (tableRef == TableRef.EMPTY_TABLE_REF) {
+            return newIterator(scanGrouper);
         }
         
         // Set miscellaneous scan attributes. This is the last chance to set them before we
         // clone the scan for each parallelized chunk.
         Scan scan = context.getScan();
+        PTable table = context.getCurrentTable().getTable();
         
         if (OrderBy.REV_ROW_KEY_ORDER_BY.equals(orderBy)) {
             ScanUtil.setReversed(scan);
@@ -185,8 +192,7 @@ public abstract class BaseQueryPlan implements QueryPlan {
         PhoenixConnection connection = context.getConnection();
 
         // set read consistency
-        if (context.getCurrentTable() != null
-                && context.getCurrentTable().getTable().getType() != PTableType.SYSTEM) {
+        if (table.getType() != PTableType.SYSTEM) {
             scan.setConsistency(connection.getConsistency());
         }
         if (context.getScanTimeRange() == null) {
@@ -198,11 +204,12 @@ public abstract class BaseQueryPlan implements QueryPlan {
         } else {
             ScanUtil.setTimeRange(scan, context.getScanTimeRange());
         }
+        
         ScanUtil.setTenantId(scan, connection.getTenantId() == null ? null : connection.getTenantId().getBytes());
         String customAnnotations = LogUtil.customAnnotationsToString(connection);
         ScanUtil.setCustomAnnotations(scan, customAnnotations == null ? null : customAnnotations.getBytes());
         // Set local index related scan attributes. 
-        if (context.getCurrentTable().getTable().getIndexType() == IndexType.LOCAL) {
+        if (table.getIndexType() == IndexType.LOCAL) {
             ScanUtil.setLocalIndex(scan);
             Set<PColumn> dataColumns = context.getDataColumns();
             // If any data columns to join back from data table are present then we set following attributes
@@ -216,8 +223,8 @@ public abstract class BaseQueryPlan implements QueryPlan {
                 KeyValueSchema schema = ProjectedColumnExpression.buildSchema(dataColumns);
                 // Set key value schema of the data columns.
                 serializeSchemaIntoScan(scan, schema);
-                String parentSchema = context.getCurrentTable().getTable().getParentSchemaName().getString();
-                String parentTable = context.getCurrentTable().getTable().getParentTableName().getString();
+                String parentSchema = table.getParentSchemaName().getString();
+                String parentTable = table.getParentTableName().getString();
                 final ParseNodeFactory FACTORY = new ParseNodeFactory();
                 TableRef dataTableRef =
                         FromCompiler.getResolver(
@@ -235,7 +242,7 @@ public abstract class BaseQueryPlan implements QueryPlan {
         	LOG.debug(LogUtil.addCustomAnnotations("Scan ready for iteration: " + scan, connection));
         }
         
-        ResultIterator iterator = newIterator();
+        ResultIterator iterator = newIterator(scanGrouper);
         iterator = dependencies.isEmpty() ?
                 iterator : new DelegateResultIterator(iterator) {
             @Override
@@ -361,7 +368,7 @@ public abstract class BaseQueryPlan implements QueryPlan {
         }
     }
 
-    abstract protected ResultIterator newIterator() throws SQLException;
+    abstract protected ResultIterator newIterator(ParallelScanGrouper scanGrouper) throws SQLException;
     
     @Override
     public long getEstimatedSize() {

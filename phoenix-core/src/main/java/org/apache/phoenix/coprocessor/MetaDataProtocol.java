@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import org.apache.hadoop.hbase.util.ByteStringer;
 import org.apache.phoenix.coprocessor.generated.MetaDataProtos;
 import org.apache.phoenix.coprocessor.generated.PFunctionProtos;
 import org.apache.phoenix.coprocessor.generated.MetaDataProtos.MetaDataResponse;
@@ -34,8 +35,6 @@ import org.apache.phoenix.util.ByteUtil;
 
 import com.google.common.collect.Lists;
 import com.google.protobuf.ByteString;
-import com.google.protobuf.HBaseZeroCopyByteString;
-
 
 /**
  *
@@ -56,15 +55,14 @@ import com.google.protobuf.HBaseZeroCopyByteString;
  */
 public abstract class MetaDataProtocol extends MetaDataService {
     public static final int PHOENIX_MAJOR_VERSION = 4;
-    public static final int PHOENIX_MINOR_VERSION = 4;
+    public static final int PHOENIX_MINOR_VERSION = 5;
     public static final int PHOENIX_PATCH_NUMBER = 0;
     public static final int PHOENIX_VERSION =
             VersionUtil.encodeVersion(PHOENIX_MAJOR_VERSION, PHOENIX_MINOR_VERSION, PHOENIX_PATCH_NUMBER);
 
     public static final long MIN_TABLE_TIMESTAMP = 0;
 
-    // Incremented from 5 to 7 with the addition of the STORE_NULLS table option in 4.3
-    public static final long MIN_SYSTEM_TABLE_TIMESTAMP = MIN_TABLE_TIMESTAMP + 7;
+    public static final long MIN_SYSTEM_TABLE_TIMESTAMP = MIN_TABLE_TIMESTAMP + 8;
     public static final int DEFAULT_MAX_META_DATA_VERSIONS = 1000;
     public static final int DEFAULT_MAX_STAT_DATA_VERSIONS = 3;
     public static final boolean DEFAULT_META_DATA_KEEP_DELETED_CELLS = true;
@@ -74,6 +72,7 @@ public abstract class MetaDataProtocol extends MetaDataService {
     public static final long MIN_SYSTEM_TABLE_TIMESTAMP_4_2_0 = MIN_TABLE_TIMESTAMP + 4;
     public static final long MIN_SYSTEM_TABLE_TIMESTAMP_4_2_1 = MIN_TABLE_TIMESTAMP + 5;
     public static final long MIN_SYSTEM_TABLE_TIMESTAMP_4_3_0 = MIN_TABLE_TIMESTAMP + 7;
+    public static final long MIN_SYSTEM_TABLE_TIMESTAMP_4_5_0 = MIN_TABLE_TIMESTAMP + 8;
     
     // TODO: pare this down to minimum, as we don't need duplicates for both table and column errors, nor should we need
     // a different code for every type of error.
@@ -224,14 +223,14 @@ public abstract class MetaDataProtocol extends MetaDataService {
             }
             if (result.getTableNamesToDelete() != null) {
               for (byte[] tableName : result.tableNamesToDelete) {
-                builder.addTablesToDelete(HBaseZeroCopyByteString.wrap(tableName));
+                builder.addTablesToDelete(ByteStringer.wrap(tableName));
               }
             }
             if(result.getColumnName() != null){
-              builder.setColumnName(HBaseZeroCopyByteString.wrap(result.getColumnName()));
+              builder.setColumnName(ByteStringer.wrap(result.getColumnName()));
             }
             if(result.getFamilyName() != null){
-              builder.setFamilyName(HBaseZeroCopyByteString.wrap(result.getFamilyName()));
+              builder.setFamilyName(ByteStringer.wrap(result.getFamilyName()));
             }
           }
           return builder.build();

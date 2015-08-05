@@ -19,7 +19,6 @@ package org.apache.phoenix.schema;
 
 import static org.apache.phoenix.hbase.index.util.KeyValueBuilder.addQuietly;
 import static org.apache.phoenix.hbase.index.util.KeyValueBuilder.deleteQuietly;
-import static org.apache.phoenix.query.QueryConstants.SEPARATOR_BYTE;
 import static org.apache.phoenix.schema.SaltingUtil.SALTING_COLUMN;
 
 import java.io.IOException;
@@ -39,6 +38,7 @@ import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
+import org.apache.hadoop.hbase.util.ByteStringer;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.phoenix.coprocessor.generated.PGuidePostsProtos;
 import org.apache.phoenix.coprocessor.generated.PGuidePostsProtos.PGuidePosts;
@@ -54,6 +54,8 @@ import org.apache.phoenix.schema.RowKeySchema.RowKeySchemaBuilder;
 import org.apache.phoenix.schema.stats.GuidePostsInfo;
 import org.apache.phoenix.schema.stats.PTableStats;
 import org.apache.phoenix.schema.stats.PTableStatsImpl;
+import org.apache.phoenix.schema.types.PBinary;
+import org.apache.phoenix.schema.types.PChar;
 import org.apache.phoenix.schema.types.PDataType;
 import org.apache.phoenix.schema.types.PVarchar;
 import org.apache.phoenix.util.ByteUtil;
@@ -71,7 +73,6 @@ import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.protobuf.HBaseZeroCopyByteString;
 import com.sun.istack.NotNull;
 
 /**
@@ -88,8 +89,8 @@ public class PTableImpl implements PTable {
 
     private PTableKey key;
     private PName name;
-    private PName schemaName;
-    private PName tableName;
+    private PName schemaName = PName.EMPTY_NAME;
+    private PName tableName = PName.EMPTY_NAME;
     private PName tenantId;
     private PTableType type;
     private PIndexState state;
@@ -125,10 +126,14 @@ public class PTableImpl implements PTable {
     private int estimatedSize;
     private IndexType indexType;
     private PTableStats tableStats = PTableStats.EMPTY_STATS;
+    private int baseColumnCount;
+    private boolean rowKeyOrderOptimizable; // TODO: remove when required that tables have been upgrade for PHOENIX-2067
+    private boolean hasColumnsRequiringUpgrade; // TODO: remove when required that tables have been upgrade for PHOENIX-2067
 
     public PTableImpl() {
         this.indexes = Collections.emptyList();
         this.physicalNames = Collections.emptyList();
+        this.rowKeySchema = RowKeySchema.EMPTY_SCHEMA;
     }
 
     public PTableImpl(PName tenantId, String schemaName, String tableName, long timestamp, List<PColumnFamily> families) { // For base table of mapped VIEW
@@ -193,7 +198,8 @@ public class PTableImpl implements PTable {
                 table.getTenantId(), table.getSchemaName(), table.getTableName(), table.getType(), table.getIndexState(), timeStamp,
                 table.getSequenceNumber(), table.getPKName(), table.getBucketNum(), getColumnsToClone(table), parentSchemaName, table.getParentTableName(),
                 indexes, table.isImmutableRows(), table.getPhysicalNames(), table.getDefaultFamilyName(), viewStatement,
-                table.isWALDisabled(), table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(), table.getIndexType(), table.getTableStats());
+                table.isWALDisabled(), table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(), table.getIndexType(),
+                table.getTableStats(), table.getBaseColumnCount(), table.rowKeyOrderOptimizable());
     }
 
     public static PTableImpl makePTable(PTable table, List<PColumn> columns) throws SQLException {
@@ -201,7 +207,8 @@ public class PTableImpl implements PTable {
                 table.getTenantId(), table.getSchemaName(), table.getTableName(), table.getType(), table.getIndexState(), table.getTimeStamp(),
                 table.getSequenceNumber(), table.getPKName(), table.getBucketNum(), columns, table.getParentSchemaName(), table.getParentTableName(),
                 table.getIndexes(), table.isImmutableRows(), table.getPhysicalNames(), table.getDefaultFamilyName(), table.getViewStatement(),
-                table.isWALDisabled(), table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(), table.getIndexType(), table.getTableStats());
+                table.isWALDisabled(), table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(), table.getIndexType(),
+                table.getTableStats(), table.getBaseColumnCount(), table.rowKeyOrderOptimizable());
     }
 
     public static PTableImpl makePTable(PTable table, long timeStamp, long sequenceNumber, List<PColumn> columns) throws SQLException {
@@ -209,7 +216,8 @@ public class PTableImpl implements PTable {
                 table.getTenantId(), table.getSchemaName(), table.getTableName(), table.getType(), table.getIndexState(), timeStamp,
                 sequenceNumber, table.getPKName(), table.getBucketNum(), columns, table.getParentSchemaName(), table.getParentTableName(), table.getIndexes(),
                 table.isImmutableRows(), table.getPhysicalNames(), table.getDefaultFamilyName(), table.getViewStatement(), table.isWALDisabled(),
-                table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(), table.getIndexType(), table.getTableStats());
+                table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(), table.getIndexType(), table.getTableStats(),
+                table.getBaseColumnCount(), table.rowKeyOrderOptimizable());
     }
 
     public static PTableImpl makePTable(PTable table, long timeStamp, long sequenceNumber, List<PColumn> columns, boolean isImmutableRows) throws SQLException {
@@ -217,7 +225,8 @@ public class PTableImpl implements PTable {
                 table.getTenantId(), table.getSchemaName(), table.getTableName(), table.getType(), table.getIndexState(), timeStamp,
                 sequenceNumber, table.getPKName(), table.getBucketNum(), columns, table.getParentSchemaName(), table.getParentTableName(),
                 table.getIndexes(), isImmutableRows, table.getPhysicalNames(), table.getDefaultFamilyName(), table.getViewStatement(),
-                table.isWALDisabled(), table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(), table.getIndexType(), table.getTableStats());
+                table.isWALDisabled(), table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(),
+                table.getIndexType(), table.getTableStats(), table.getBaseColumnCount(), table.rowKeyOrderOptimizable());
     }
     
     public static PTableImpl makePTable(PTable table, long timeStamp, long sequenceNumber, List<PColumn> columns, boolean isImmutableRows, boolean isWalDisabled, boolean isMultitenant, boolean storeNulls) throws SQLException {
@@ -225,7 +234,8 @@ public class PTableImpl implements PTable {
                 table.getTenantId(), table.getSchemaName(), table.getTableName(), table.getType(), table.getIndexState(), timeStamp,
                 sequenceNumber, table.getPKName(), table.getBucketNum(), columns, table.getParentSchemaName(), table.getParentTableName(),
                 table.getIndexes(), isImmutableRows, table.getPhysicalNames(), table.getDefaultFamilyName(), table.getViewStatement(),
-                isWalDisabled, isMultitenant, storeNulls, table.getViewType(), table.getViewIndexId(), table.getIndexType(), table.getTableStats());
+                isWalDisabled, isMultitenant, storeNulls, table.getViewType(), table.getViewIndexId(), table.getIndexType(), table.getTableStats(),
+                table.getBaseColumnCount(), table.rowKeyOrderOptimizable());
     }
     
     public static PTableImpl makePTable(PTable table, PIndexState state) throws SQLException {
@@ -234,7 +244,18 @@ public class PTableImpl implements PTable {
                 table.getSequenceNumber(), table.getPKName(), table.getBucketNum(), getColumnsToClone(table),
                 table.getParentSchemaName(), table.getParentTableName(), table.getIndexes(),
                 table.isImmutableRows(), table.getPhysicalNames(), table.getDefaultFamilyName(), table.getViewStatement(),
-                table.isWALDisabled(), table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(), table.getIndexType(), table.getTableStats());
+                table.isWALDisabled(), table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(), table.getIndexType(),
+                table.getTableStats(), table.getBaseColumnCount(), table.rowKeyOrderOptimizable());
+    }
+
+    public static PTableImpl makePTable(PTable table, boolean rowKeyOrderOptimizable) throws SQLException {
+        return new PTableImpl(
+                table.getTenantId(), table.getSchemaName(), table.getTableName(), table.getType(), table.getIndexState(), table.getTimeStamp(),
+                table.getSequenceNumber(), table.getPKName(), table.getBucketNum(), getColumnsToClone(table),
+                table.getParentSchemaName(), table.getParentTableName(), table.getIndexes(),
+                table.isImmutableRows(), table.getPhysicalNames(), table.getDefaultFamilyName(), table.getViewStatement(),
+                table.isWALDisabled(), table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(), table.getIndexType(), table.getTableStats(),
+                table.getBaseColumnCount(), rowKeyOrderOptimizable);
     }
 
     public static PTableImpl makePTable(PTable table, PTableStats stats) throws SQLException {
@@ -243,28 +264,29 @@ public class PTableImpl implements PTable {
                 table.getSequenceNumber(), table.getPKName(), table.getBucketNum(), getColumnsToClone(table),
                 table.getParentSchemaName(), table.getParentTableName(), table.getIndexes(),
                 table.isImmutableRows(), table.getPhysicalNames(), table.getDefaultFamilyName(), table.getViewStatement(),
-                table.isWALDisabled(), table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(), table.getIndexType(), stats);
+                table.isWALDisabled(), table.isMultiTenant(), table.getStoreNulls(), table.getViewType(), table.getViewIndexId(), table.getIndexType(), stats,
+                table.getBaseColumnCount(), table.rowKeyOrderOptimizable());
     }
 
     public static PTableImpl makePTable(PName tenantId, PName schemaName, PName tableName, PTableType type, PIndexState state, long timeStamp, long sequenceNumber,
             PName pkName, Integer bucketNum, List<PColumn> columns, PName dataSchemaName, PName dataTableName, List<PTable> indexes,
             boolean isImmutableRows, List<PName> physicalNames, PName defaultFamilyName, String viewExpression, boolean disableWAL, boolean multiTenant,
-            boolean storeNulls, ViewType viewType, Short viewIndexId, IndexType indexType) throws SQLException {
+            boolean storeNulls, ViewType viewType, Short viewIndexId, IndexType indexType, boolean rowKeyOrderOptimizable) throws SQLException {
         return new PTableImpl(tenantId, schemaName, tableName, type, state, timeStamp, sequenceNumber, pkName, bucketNum, columns, dataSchemaName,
                 dataTableName, indexes, isImmutableRows, physicalNames, defaultFamilyName,
                 viewExpression, disableWAL, multiTenant, storeNulls, viewType, viewIndexId,
-                indexType, PTableStats.EMPTY_STATS);
+                indexType, PTableStats.EMPTY_STATS, QueryConstants.BASE_TABLE_BASE_COLUMN_COUNT, rowKeyOrderOptimizable);
     }
 
     public static PTableImpl makePTable(PName tenantId, PName schemaName, PName tableName, PTableType type,
             PIndexState state, long timeStamp, long sequenceNumber, PName pkName, Integer bucketNum,
             List<PColumn> columns, PName dataSchemaName, PName dataTableName, List<PTable> indexes,
             boolean isImmutableRows, List<PName> physicalNames, PName defaultFamilyName, String viewExpression,
-            boolean disableWAL, boolean multiTenant, boolean storeNulls, ViewType viewType, Short viewIndexId, IndexType indexType, @NotNull PTableStats stats)
+            boolean disableWAL, boolean multiTenant, boolean storeNulls, ViewType viewType, Short viewIndexId, IndexType indexType, @NotNull PTableStats stats, int baseColumnCount, boolean rowKeyOrderOptimizable)
             throws SQLException {
         return new PTableImpl(tenantId, schemaName, tableName, type, state, timeStamp, sequenceNumber, pkName,
                 bucketNum, columns, dataSchemaName, dataTableName, indexes, isImmutableRows, physicalNames,
-                defaultFamilyName, viewExpression, disableWAL, multiTenant, storeNulls, viewType, viewIndexId, indexType, stats);
+                defaultFamilyName, viewExpression, disableWAL, multiTenant, storeNulls, viewType, viewIndexId, indexType, stats, baseColumnCount, rowKeyOrderOptimizable);
     }
 
     private PTableImpl(PName tenantId, PName schemaName, PName tableName, PTableType type, PIndexState state,
@@ -272,10 +294,10 @@ public class PTableImpl implements PTable {
             PName parentSchemaName, PName parentTableName, List<PTable> indexes, boolean isImmutableRows,
             List<PName> physicalNames, PName defaultFamilyName, String viewExpression, boolean disableWAL, boolean multiTenant,
             boolean storeNulls, ViewType viewType, Short viewIndexId, IndexType indexType,
-            PTableStats stats) throws SQLException {
+            PTableStats stats, int baseColumnCount, boolean rowKeyOrderOptimizable) throws SQLException {
         init(tenantId, schemaName, tableName, type, state, timeStamp, sequenceNumber, pkName, bucketNum, columns,
                 stats, schemaName, parentTableName, indexes, isImmutableRows, physicalNames, defaultFamilyName,
-                viewExpression, disableWAL, multiTenant, storeNulls, viewType, viewIndexId, indexType);
+                viewExpression, disableWAL, multiTenant, storeNulls, viewType, viewIndexId, indexType, baseColumnCount, rowKeyOrderOptimizable);
     }
 
     @Override
@@ -303,7 +325,7 @@ public class PTableImpl implements PTable {
             PName pkName, Integer bucketNum, List<PColumn> columns, PTableStats stats, PName parentSchemaName, PName parentTableName,
             List<PTable> indexes, boolean isImmutableRows, List<PName> physicalNames, PName defaultFamilyName, String viewExpression, boolean disableWAL,
             boolean multiTenant, boolean storeNulls, ViewType viewType, Short viewIndexId,
-            IndexType indexType ) throws SQLException {
+            IndexType indexType , int baseColumnCount, boolean rowKeyOrderOptimizable) throws SQLException {
         Preconditions.checkNotNull(schemaName);
         Preconditions.checkArgument(tenantId==null || tenantId.getBytes().length > 0); // tenantId should be null or not empty
         int estimatedSize = SizedUtil.OBJECT_SIZE * 2 + 23 * SizedUtil.POINTER_SIZE + 4 * SizedUtil.INT_SIZE + 2 * SizedUtil.LONG_SIZE + 2 * SizedUtil.INT_OBJECT_SIZE +
@@ -333,6 +355,7 @@ public class PTableImpl implements PTable {
         this.viewIndexId = viewIndexId;
         this.indexType = indexType;
         this.tableStats = stats;
+        this.rowKeyOrderOptimizable = rowKeyOrderOptimizable;
         List<PColumn> pkColumns;
         PColumn[] allColumns;
         
@@ -384,7 +407,9 @@ public class PTableImpl implements PTable {
         for (PColumn column : allColumns) {
             PName familyName = column.getFamilyName();
             if (familyName == null) {
-            	 pkColumns.add(column);
+                hasColumnsRequiringUpgrade |= (column.getSortOrder() == SortOrder.DESC && (!column.getDataType().isFixedWidth() || column.getDataType() == PChar.INSTANCE || column.getDataType() == PBinary.INSTANCE))
+                        || (column.getSortOrder() == SortOrder.ASC && column.getDataType() == PBinary.INSTANCE && column.getMaxLength() != null && column.getMaxLength() > 1);
+            	pkColumns.add(column);
             }
             if (familyName == null) {
                 estimatedSize += column.getEstimatedSize(); // PK columns
@@ -399,6 +424,7 @@ public class PTableImpl implements PTable {
             }
         }
         this.pkColumns = ImmutableList.copyOf(pkColumns);
+        builder.rowKeyOrderOptimizable(this.rowKeyOrderOptimizable()); // after hasDescVarLengthColumns is calculated
         this.rowKeySchema = builder.build();
         estimatedSize += rowKeySchema.getEstimatedSize();
         Iterator<Map.Entry<PName,List<PColumn>>> iterator = familyMap.entrySet().iterator();
@@ -437,6 +463,7 @@ public class PTableImpl implements PTable {
         }
 
         this.estimatedSize = estimatedSize;
+        this.baseColumnCount = baseColumnCount;
     }
 
     @Override
@@ -497,18 +524,22 @@ public class PTableImpl implements PTable {
             List<PColumn> columns = getPKColumns();
             int nColumns = columns.size();
             PDataType type = null;
+            SortOrder sortOrder = null;
+            boolean wasNull = false;
             while (i < nValues && i < nColumns) {
                 // Separate variable length column values in key with zero byte
                 if (type != null && !type.isFixedWidth()) {
-                    os.write(SEPARATOR_BYTE);
+                    os.write(SchemaUtil.getSeparatorByte(rowKeyOrderOptimizable(), wasNull, sortOrder));
                 }
                 PColumn column = columns.get(i);
+                sortOrder = column.getSortOrder();
                 type = column.getDataType();
                 // This will throw if the value is null and the type doesn't allow null
                 byte[] byteValue = values[i++];
                 if (byteValue == null) {
                     byteValue = ByteUtil.EMPTY_BYTE_ARRAY;
                 }
+                wasNull = byteValue.length == 0;
                 // An empty byte array return value means null. Do this,
                 // since a type may have muliple representations of null.
                 // For example, VARCHAR treats both null and an empty string
@@ -519,18 +550,29 @@ public class PTableImpl implements PTable {
                     throw new ConstraintViolationException(name.getString() + "." + column.getName().getString() + " may not be null");
                 }
                 Integer	maxLength = column.getMaxLength();
-                if (maxLength != null && type.isFixedWidth() && byteValue.length <= maxLength) {
-                    byteValue = StringUtil.padChar(byteValue, maxLength);
+                if (maxLength != null && type.isFixedWidth() && byteValue.length < maxLength) {
+                    if (rowKeyOrderOptimizable()) {
+                        key.set(byteValue);
+                        type.pad(key, maxLength, sortOrder);
+                        byteValue = ByteUtil.copyKeyBytesIfNecessary(key);
+                    } else {
+                        // TODO: remove this incorrect code and move StringUtil.padChar() to TestUtil
+                        // once we require tables to have been upgraded
+                        byteValue = StringUtil.padChar(byteValue, maxLength);
+                    }
                 } else if (maxLength != null && byteValue.length > maxLength) {
                     throw new DataExceedsCapacityException(name.getString() + "." + column.getName().getString() + " may not exceed " + maxLength + " bytes (" + SchemaUtil.toString(type, byteValue) + ")");
                 }
                 os.write(byteValue, 0, byteValue.length);
             }
+            // Need trailing byte for DESC columns
+            if (type != null && !type.isFixedWidth() && SchemaUtil.getSeparatorByte(rowKeyOrderOptimizable(), wasNull, sortOrder) == QueryConstants.DESC_SEPARATOR_BYTE) {
+                os.write(QueryConstants.DESC_SEPARATOR_BYTE);
+            }
             // If some non null pk values aren't set, then throw
             if (i < nColumns) {
                 PColumn column = columns.get(i);
-                type = column.getDataType();
-                if (type.isFixedWidth() || !column.isNullable()) {
+                if (column.getDataType().isFixedWidth() || !column.isNullable()) {
                     throw new ConstraintViolationException(name.getString() + "." + column.getName().getString() + " may not be null");
                 }
             }
@@ -702,7 +744,7 @@ public class PTableImpl implements PTable {
                         HConstants.EMPTY_BYTE_ARRAY : byteValue);
                 Integer	maxLength = column.getMaxLength();
             	if (!isNull && type.isFixedWidth() && maxLength != null) {
-    				if (ptr.getLength() <= maxLength) {
+    				if (ptr.getLength() < maxLength) {
                         type.pad(ptr, maxLength, column.getSortOrder());
                     } else if (ptr.getLength() > maxLength) {
                         throw new DataExceedsCapacityException(name.getString() + "." + column.getName().getString() + " may not exceed " + maxLength + " bytes (" + type.toObject(byteValue) + ")");
@@ -968,13 +1010,22 @@ public class PTableImpl implements PTable {
           physicalNames.add(PNameFactory.newName(table.getPhysicalNames(i).toByteArray()));
         }
       }
+      
+      int baseColumnCount = -1;
+      if (table.hasBaseColumnCount()) {
+          baseColumnCount = table.getBaseColumnCount();
+      }
 
+      boolean rowKeyOrderOptimizable = false;
+      if (table.hasRowKeyOrderOptimizable()) {
+          rowKeyOrderOptimizable = table.getRowKeyOrderOptimizable();
+      }
       try {
         PTableImpl result = new PTableImpl();
         result.init(tenantId, schemaName, tableName, tableType, indexState, timeStamp, sequenceNumber, pkName,
           (bucketNum == NO_SALTING) ? null : bucketNum, columns, stats, schemaName,dataTableName, indexes,
               isImmutableRows, physicalNames, defaultFamilyName, viewStatement, disableWAL,
-                multiTenant, storeNulls, viewType, viewIndexId, indexType);
+                multiTenant, storeNulls, viewType, viewIndexId, indexType, baseColumnCount, rowKeyOrderOptimizable);
         return result;
       } catch (SQLException e) {
         throw new RuntimeException(e); // Impossible
@@ -984,10 +1035,10 @@ public class PTableImpl implements PTable {
     public static PTableProtos.PTable toProto(PTable table) {
       PTableProtos.PTable.Builder builder = PTableProtos.PTable.newBuilder();
       if(table.getTenantId() != null){
-        builder.setTenantId(HBaseZeroCopyByteString.wrap(table.getTenantId().getBytes()));
+        builder.setTenantId(ByteStringer.wrap(table.getTenantId().getBytes()));
       }
-      builder.setSchemaNameBytes(HBaseZeroCopyByteString.wrap(table.getSchemaName().getBytes()));
-      builder.setTableNameBytes(HBaseZeroCopyByteString.wrap(table.getTableName().getBytes()));
+      builder.setSchemaNameBytes(ByteStringer.wrap(table.getSchemaName().getBytes()));
+      builder.setTableNameBytes(ByteStringer.wrap(table.getTableName().getBytes()));
       builder.setTableType(ProtobufUtil.toPTableTypeProto(table.getType()));
       if (table.getType() == PTableType.INDEX) {
     	if(table.getIndexState() != null) {
@@ -997,14 +1048,14 @@ public class PTableImpl implements PTable {
     	  builder.setViewIndexId(table.getViewIndexId());
     	}
     	if(table.getIndexType() != null) {
-    	    builder.setIndexType(HBaseZeroCopyByteString.wrap(new byte[]{table.getIndexType().getSerializedValue()}));
+    	    builder.setIndexType(ByteStringer.wrap(new byte[]{table.getIndexType().getSerializedValue()}));
     	}
       }
       builder.setSequenceNumber(table.getSequenceNumber());
       builder.setTimeStamp(table.getTimeStamp());
       PName tmp = table.getPKName();
       if (tmp != null) {
-        builder.setPkNameBytes(HBaseZeroCopyByteString.wrap(tmp.getBytes()));
+        builder.setPkNameBytes(ByteStringer.wrap(tmp.getBytes()));
       }
       Integer bucketNum = table.getBucketNum();
       int offset = 0;
@@ -1029,14 +1080,14 @@ public class PTableImpl implements PTable {
 
       for (Map.Entry<byte[], GuidePostsInfo> entry : table.getTableStats().getGuidePosts().entrySet()) {
          PTableProtos.PTableStats.Builder statsBuilder = PTableProtos.PTableStats.newBuilder();
-         statsBuilder.setKey(HBaseZeroCopyByteString.wrap(entry.getKey()));
+         statsBuilder.setKey(ByteStringer.wrap(entry.getKey()));
          for (byte[] stat : entry.getValue().getGuidePosts()) {
-             statsBuilder.addValues(HBaseZeroCopyByteString.wrap(stat));
+             statsBuilder.addValues(ByteStringer.wrap(stat));
          }
          statsBuilder.setGuidePostsByteCount(entry.getValue().getByteCount());
          PGuidePostsProtos.PGuidePosts.Builder guidePstsBuilder = PGuidePostsProtos.PGuidePosts.newBuilder();
          for (byte[] stat : entry.getValue().getGuidePosts()) {
-             guidePstsBuilder.addGuidePosts(HBaseZeroCopyByteString.wrap(stat));
+             guidePstsBuilder.addGuidePosts(ByteStringer.wrap(stat));
          }
          guidePstsBuilder.setByteCount(entry.getValue().getByteCount());
          guidePstsBuilder.setRowCount(entry.getValue().getRowCount());
@@ -1046,23 +1097,25 @@ public class PTableImpl implements PTable {
       builder.setStatsTimeStamp(table.getTableStats().getTimestamp());
 
       if (table.getParentName() != null) {
-        builder.setDataTableNameBytes(HBaseZeroCopyByteString.wrap(table.getParentTableName().getBytes()));
+        builder.setDataTableNameBytes(ByteStringer.wrap(table.getParentTableName().getBytes()));
       }
       if (table.getDefaultFamilyName()!= null) {
-        builder.setDefaultFamilyName(HBaseZeroCopyByteString.wrap(table.getDefaultFamilyName().getBytes()));
+        builder.setDefaultFamilyName(ByteStringer.wrap(table.getDefaultFamilyName().getBytes()));
       }
       builder.setDisableWAL(table.isWALDisabled());
       builder.setMultiTenant(table.isMultiTenant());
       builder.setStoreNulls(table.getStoreNulls());
       if(table.getType() == PTableType.VIEW){
-        builder.setViewType(HBaseZeroCopyByteString.wrap(new byte[]{table.getViewType().getSerializedValue()}));
-        builder.setViewStatement(HBaseZeroCopyByteString.wrap(PVarchar.INSTANCE.toBytes(table.getViewStatement())));
+        builder.setViewType(ByteStringer.wrap(new byte[]{table.getViewType().getSerializedValue()}));
+        builder.setViewStatement(ByteStringer.wrap(PVarchar.INSTANCE.toBytes(table.getViewStatement())));
       }
       if(table.getType() == PTableType.VIEW || table.getViewIndexId() != null){
         for (int i = 0; i < table.getPhysicalNames().size(); i++) {
-          builder.addPhysicalNames(HBaseZeroCopyByteString.wrap(table.getPhysicalNames().get(i).getBytes()));
+          builder.addPhysicalNames(ByteStringer.wrap(table.getPhysicalNames().get(i).getBytes()));
         }
       }
+      builder.setBaseColumnCount(table.getBaseColumnCount());
+      builder.setRowKeyOrderOptimizable(table.rowKeyOrderOptimizable());
 
       return builder.build();
     }
@@ -1082,4 +1135,13 @@ public class PTableImpl implements PTable {
         return parentSchemaName;
     }
 
+    @Override
+    public int getBaseColumnCount() {
+        return baseColumnCount;
+    }
+
+    @Override
+    public boolean rowKeyOrderOptimizable() {
+        return rowKeyOrderOptimizable || !hasColumnsRequiringUpgrade;
+    }
 }

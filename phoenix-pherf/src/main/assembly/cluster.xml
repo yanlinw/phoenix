@@ -38,14 +38,13 @@
             <outputDirectory>pherf-${project.version}-cluster/</outputDirectory>
             <includes>
                 <include>*sh</include>
-                <include>*dependencies.jar</include>
             </includes>
         </fileSet>
         <fileSet>
             <directory>${project.build.directory}</directory>
             <outputDirectory>pherf-${project.version}-cluster/lib</outputDirectory>
             <includes>
-                <include>*dependencies.jar</include>
+                <include>*minimal.jar</include>
             </includes>
         </fileSet>
     </fileSets>

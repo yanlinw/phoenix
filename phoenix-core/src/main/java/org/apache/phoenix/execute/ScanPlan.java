@@ -18,8 +18,6 @@
 package org.apache.phoenix.execute;
 
 
-import static org.apache.phoenix.util.ScanUtil.shouldRowsBeInRowKeyOrder;
-
 import java.sql.SQLException;
 import java.util.List;
 
@@ -38,6 +36,7 @@ import org.apache.phoenix.iterate.MergeSortRowKeyResultIterator;
 import org.apache.phoenix.iterate.MergeSortTopNResultIterator;
 import org.apache.phoenix.iterate.ParallelIteratorFactory;
 import org.apache.phoenix.iterate.ParallelIterators;
+import org.apache.phoenix.iterate.ParallelScanGrouper;
 import org.apache.phoenix.iterate.ResultIterator;
 import org.apache.phoenix.iterate.ResultIterators;
 import org.apache.phoenix.iterate.RoundRobinResultIterator;
@@ -161,7 +160,7 @@ public class ScanPlan extends BaseQueryPlan {
     }
 
     @Override
-    protected ResultIterator newIterator() throws SQLException {
+    protected ResultIterator newIterator(ParallelScanGrouper scanGrouper) throws SQLException {
         // Set any scan attributes before creating the scanner, as it will be too late afterwards
     	Scan scan = context.getScan();
         scan.setAttribute(BaseScannerRegionObserver.NON_AGGREGATE_QUERY, QueryConstants.TRUE);
@@ -177,18 +176,28 @@ public class ScanPlan extends BaseQueryPlan {
         Integer perScanLimit = !allowPageFilter || isOrdered ? null : limit;
         ResultIterators iterators;
         if (isSerial) {
-        	iterators = new SerialIterators(this, perScanLimit, parallelIteratorFactory);
+        	iterators = new SerialIterators(this, perScanLimit, parallelIteratorFactory, scanGrouper);
         } else {
-        	iterators = new ParallelIterators(this, perScanLimit, parallelIteratorFactory);
+        	iterators = new ParallelIterators(this, perScanLimit, parallelIteratorFactory, scanGrouper);
         }
         splits = iterators.getSplits();
         scans = iterators.getScans();
         if (isOrdered) {
             scanner = new MergeSortTopNResultIterator(iterators, limit, orderBy.getOrderByExpressions());
         } else {
-            if ((isSalted || table.getIndexType() == IndexType.LOCAL) && shouldRowsBeInRowKeyOrder(orderBy, context)) { 
+            if ((isSalted || table.getIndexType() == IndexType.LOCAL) && ScanUtil.shouldRowsBeInRowKeyOrder(orderBy, context)) {
+                /*
+                 * For salted tables or local index, a merge sort is needed if: 
+                 * 1) The config phoenix.query.force.rowkeyorder is set to true 
+                 * 2) Or if the query has an order by that wants to sort
+                 * the results by the row key (forward or reverse ordering)
+                 */
                 scanner = new MergeSortRowKeyResultIterator(iterators, isSalted ? SaltingUtil.NUM_SALTING_BYTES : 0, orderBy == OrderBy.REV_ROW_KEY_ORDER_BY);
             } else if (useRoundRobinIterator()) {
+                /*
+                 * For any kind of tables, round robin is possible if there is
+                 * no ordering of rows needed.
+                 */
                 scanner = new RoundRobinResultIterator(iterators, this);
             } else {
                 scanner = new ConcatResultIterator(iterators);

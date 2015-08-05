@@ -14,14 +14,16 @@
 package org.apache.phoenix.spark
 
 import java.sql.{PreparedStatement, ResultSet}
+import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.mapreduce.lib.db.DBWritable
-import org.apache.phoenix.mapreduce.util.ColumnInfoToStringEncoderDecoder
-import org.apache.phoenix.schema.types.{PDate, PhoenixArray}
+import org.apache.phoenix.schema.types.{PDataType, PDate, PhoenixArray}
+import org.apache.phoenix.util.ColumnInfo
 import org.joda.time.DateTime
 import scala.collection.{immutable, mutable}
 import scala.collection.JavaConversions._
 
-class PhoenixRecordWritable(var encodedColumns: String) extends DBWritable {
+
+class PhoenixRecordWritable(columnMetaDataList: List[ColumnInfo]) extends DBWritable {
   val upsertValues = mutable.ArrayBuffer[Any]()
   val resultMap = mutable.Map[String, AnyRef]()
 
@@ -30,27 +32,38 @@ class PhoenixRecordWritable(var encodedColumns: String) extends DBWritable {
   }
 
   override def write(statement: PreparedStatement): Unit = {
-    // Decode the ColumnInfo list
-    val columns = ConfigurationUtil.decodeColumns(encodedColumns)
-
     // Make sure we at least line up in size
-    if(upsertValues.length != columns.length) {
+    if(upsertValues.length != columnMetaDataList.length) {
       throw new UnsupportedOperationException(
-        s"Upsert values ($upsertValues) do not match the specified columns ($columns)"
+        s"Upsert values ($upsertValues) do not match the specified columns (columnMetaDataList)"
       )
     }
 
     // Correlate each value (v) to a column type (c) and an index (i)
-    upsertValues.zip(columns).zipWithIndex.foreach {
+    upsertValues.zip(columnMetaDataList).zipWithIndex.foreach {
       case ((v, c), i) => {
         if (v != null) {
+
           // Both Java and Joda dates used to work in 4.2.3, but now they must be java.sql.Date
+          // Can override any other types here as needed
           val (finalObj, finalType) = v match {
-            case dt: DateTime => (new java.sql.Date(dt.getMillis), PDate.INSTANCE.getSqlType)
-            case d: java.util.Date => (new java.sql.Date(d.getTime), PDate.INSTANCE.getSqlType)
-            case _ => (v, c.getSqlType)
+            case dt: DateTime => (new java.sql.Date(dt.getMillis), PDate.INSTANCE)
+            case d: java.util.Date => (new java.sql.Date(d.getTime), PDate.INSTANCE)
+            case _ => (v, c.getPDataType)
           }
-          statement.setObject(i + 1, finalObj, finalType)
+
+          // Save as array or object
+          finalObj match {
+            case obj: Array[AnyRef] => {
+              // Create a java.sql.Array, need to lookup the base sql type name
+              val sqlArray = statement.getConnection.createArrayOf(
+                PDataType.arrayBaseType(finalType).getSqlTypeName,
+                obj
+              )
+              statement.setArray(i + 1, sqlArray)
+            }
+            case _ => statement.setObject(i + 1, finalObj)
+          }
         } else {
           statement.setNull(i + 1, c.getSqlType)
         }
@@ -79,11 +92,7 @@ class PhoenixRecordWritable(var encodedColumns: String) extends DBWritable {
 
   // Empty constructor for MapReduce
   def this() = {
-    this("")
+    this(List[ColumnInfo]())
   }
 
-  // Encoded columns are a Phoenix-serialized representation of the column meta data
-  def setEncodedColumns(encodedColumns: String) {
-    this.encodedColumns = encodedColumns
-  }
 }

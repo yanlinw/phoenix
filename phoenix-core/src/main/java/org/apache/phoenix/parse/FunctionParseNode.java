@@ -41,6 +41,7 @@ import org.apache.phoenix.expression.function.FunctionExpression;
 import org.apache.phoenix.expression.function.UDFExpression;
 import org.apache.phoenix.parse.PFunction.FunctionArgument;
 import org.apache.phoenix.schema.ArgumentTypeMismatchException;
+import org.apache.phoenix.schema.FunctionNotFoundException;
 import org.apache.phoenix.schema.ValueRangeExcpetion;
 import org.apache.phoenix.schema.types.PDataType;
 import org.apache.phoenix.schema.types.PDataTypeFactory;
@@ -133,6 +134,9 @@ public class FunctionParseNode extends CompoundParseNode {
     public List<Expression> validate(List<Expression> children, StatementContext context) throws SQLException {
         BuiltInFunctionInfo info = this.getInfo();
         BuiltInFunctionArgInfo[] args = info.getArgs();
+        if (args.length < children.size() || info.getRequiredArgCount() > children.size()) {
+            throw new FunctionNotFoundException(this.name);
+        }
         if (args.length > children.size()) {
             List<Expression> moreChildren = new ArrayList<Expression>(children);
             for (int i = children.size(); i < info.getArgs().length; i++) {
@@ -415,14 +419,11 @@ public class FunctionParseNode extends CompoundParseNode {
             this.allowedTypes = new Class[] { dataType.getClass() };
             this.isConstant = arg.isConstant();
             this.defaultValue =
-                    arg.getDefaultValue() == null ? null : getExpFromConstant((String) arg
-                            .getDefaultValue().getValue());
+                    arg.getDefaultValue() == null ? null : arg.getDefaultValue();
             this.minValue =
-                    arg.getMinValue() == null ? null : getExpFromConstant((String) arg
-                            .getMinValue().getValue());
+                    arg.getMinValue() == null ? null : arg.getMinValue();
             this.maxValue =
-                    arg.getMaxValue() == null ? null : getExpFromConstant((String) arg
-                            .getMaxValue().getValue());
+                    arg.getMaxValue() == null ? null : arg.getMaxValue();
         }
         
         private LiteralExpression getExpFromConstant(String strValue) {

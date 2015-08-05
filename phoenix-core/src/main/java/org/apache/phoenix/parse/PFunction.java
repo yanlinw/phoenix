@@ -22,6 +22,7 @@ import java.util.Collections;
 import java.util.List;
 
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.util.ByteStringer;
 import org.apache.phoenix.coprocessor.generated.PFunctionProtos;
 import org.apache.phoenix.coprocessor.generated.PFunctionProtos.PFunctionArg;
 import org.apache.phoenix.expression.LiteralExpression;
@@ -29,9 +30,9 @@ import org.apache.phoenix.schema.PMetaDataEntity;
 import org.apache.phoenix.schema.PName;
 import org.apache.phoenix.schema.PNameFactory;
 import org.apache.phoenix.schema.PTableKey;
+import org.apache.phoenix.schema.types.PDataType;
+import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.SizedUtil;
-
-import com.google.protobuf.HBaseZeroCopyByteString;
 
 public class PFunction implements PMetaDataEntity {
 
@@ -45,6 +46,7 @@ public class PFunction implements PMetaDataEntity {
     private long timeStamp;
     private int estimatedSize;
     private boolean temporary;
+    private boolean replace;
 
     public PFunction(long timeStamp) { // For index delete marker
         this.timeStamp = timeStamp;
@@ -70,11 +72,23 @@ public class PFunction implements PMetaDataEntity {
     public PFunction(PFunction function, boolean temporary) {
         this(function.getTenantId(), function.getFunctionName(), function.getFunctionArguments(),
                 function.getReturnType(), function.getClassName(), function.getJarPath(), function
-                        .getTimeStamp(), temporary);
+                        .getTimeStamp(), temporary, function.isReplace());
+    }
+
+    public PFunction(PFunction function, boolean temporary, boolean isReplace) {
+        this(function.getTenantId(), function.getFunctionName(), function.getFunctionArguments(),
+                function.getReturnType(), function.getClassName(), function.getJarPath(), function
+                        .getTimeStamp(), temporary, isReplace);
+    }
+
+    public PFunction(PName tenantId, String functionName, List<FunctionArgument> args,
+            String returnType, String className, String jarPath, long timeStamp, boolean temporary) {
+        this(tenantId, functionName, args, returnType, className, jarPath, timeStamp, temporary,
+                false);
     }
 
     public PFunction(PName tenantId, String functionName, List<FunctionArgument> args, String returnType,
-            String className, String jarPath, long timeStamp, boolean temporary) {
+            String className, String jarPath, long timeStamp, boolean temporary, boolean replace) {
         this.tenantId = tenantId;
         this.functionName = PNameFactory.newName(functionName);
         if (args == null){ 
@@ -93,12 +107,11 @@ public class PFunction implements PMetaDataEntity {
                 PNameFactory.getEstimatedSize(this.className) +
                  (jarPath==null?0:PNameFactory.getEstimatedSize(this.jarPath));
         this.temporary = temporary;
+        this.replace = replace;
     }
 
     public PFunction(PFunction function) {
-        this(function.getTenantId(), function.getFunctionName(), function.getFunctionArguments(),
-                function.getReturnType(), function.getClassName(), function.getJarPath(), function
-                        .getTimeStamp());
+        this(function, function.isTemporaryFunction());
     }
 
     public String getFunctionName() {
@@ -193,7 +206,7 @@ public class PFunction implements PMetaDataEntity {
     public static PFunctionProtos.PFunction toProto(PFunction function) {
         PFunctionProtos.PFunction.Builder builder = PFunctionProtos.PFunction.newBuilder();
         if(function.getTenantId() != null){
-          builder.setTenantId(HBaseZeroCopyByteString.wrap(function.getTenantId().getBytes()));
+          builder.setTenantId(ByteStringer.wrap(function.getTenantId().getBytes()));
         }
         builder.setFunctionName(function.getFunctionName());
         builder.setClassname(function.getClassName());
@@ -218,6 +231,9 @@ public class PFunction implements PMetaDataEntity {
             }
             builder.addArguments(argBuilder.build());
         }
+        if(builder.hasIsReplace()) {
+            builder.setIsReplace(function.isReplace());
+        }
         return builder.build();
       }
 
@@ -236,20 +252,29 @@ public class PFunction implements PMetaDataEntity {
         for(PFunctionArg arg: function.getArgumentsList()) {
             String argType = arg.getArgumentType();
             boolean isArrayType = arg.hasIsArrayType()?arg.getIsArrayType():false;
+			PDataType dataType = isArrayType ? PDataType.fromTypeId(PDataType
+					.sqlArrayType(SchemaUtil.normalizeIdentifier(SchemaUtil
+							.normalizeIdentifier(argType)))) : PDataType
+					.fromSqlTypeName(SchemaUtil.normalizeIdentifier(argType));
             boolean isConstant = arg.hasIsConstant()?arg.getIsConstant():false;
             String defaultValue = arg.hasDefaultValue()?arg.getDefaultValue():null;
             String minValue = arg.hasMinValue()?arg.getMinValue():null;
             String maxValue = arg.hasMaxValue()?arg.getMaxValue():null;
             args.add(new FunctionArgument(argType, isArrayType, isConstant,
-                    defaultValue == null ? null : LiteralExpression.newConstant(defaultValue),
-                    minValue == null ? null : LiteralExpression.newConstant(minValue),
-                    maxValue == null ? null : LiteralExpression.newConstant(maxValue)));
+                    defaultValue == null ? null : LiteralExpression.newConstant((new LiteralParseNode(dataType.toObject(defaultValue))).getValue()),
+                    minValue == null ? null : LiteralExpression.newConstant((new LiteralParseNode(dataType.toObject(minValue))).getValue()),
+                    maxValue == null ? null : LiteralExpression.newConstant((new LiteralParseNode(dataType.toObject(maxValue))).getValue())));
         }
-        return new PFunction(tenantId,functionName, args, returnType, className, jarPath, timeStamp);
+        return new PFunction(tenantId, functionName, args, returnType, className, jarPath,
+                timeStamp, false, function.hasIsReplace() ? true : false);
     }
 
     public int getEstimatedSize() {
         return estimatedSize;
+    }
+
+    public boolean isReplace() {
+        return this.replace;
     }
 }
 

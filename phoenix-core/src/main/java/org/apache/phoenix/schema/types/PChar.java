@@ -25,6 +25,7 @@ import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.phoenix.exception.DataExceedsCapacityException;
 import org.apache.phoenix.schema.SortOrder;
+import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.StringUtil;
 
 import com.google.common.base.Strings;
@@ -52,10 +53,21 @@ public class PChar extends PDataType<String> {
     }
 
     @Override
+    public byte[] pad(byte[] b, Integer maxLength, SortOrder sortOrder) {
+      if (b == null || b.length >= maxLength) {
+        return b;
+      }
+      byte[] newBytes = new byte[maxLength];
+      System.arraycopy(b, 0, newBytes, 0, b.length);
+      Arrays.fill(newBytes, b.length, maxLength, sortOrder == SortOrder.ASC ? StringUtil.SPACE_UTF8 : StringUtil.INVERTED_SPACE_UTF8);
+      return newBytes;
+    }
+
+    @Override
     public Object pad(Object object, Integer maxLength) {
       String s = (String) object;
       if (s == null) {
-        return s;
+        return Strings.padEnd("", maxLength, ' ');
       }
       if (s.length() == maxLength) {
         return object;
@@ -69,7 +81,7 @@ public class PChar extends PDataType<String> {
     @Override
     public byte[] toBytes(Object object) {
       if (object == null) {
-        throw newIllegalDataException(this + " may not be null");
+        return ByteUtil.EMPTY_BYTE_ARRAY;
       }
       byte[] b = PVarchar.INSTANCE.toBytes(object);
       if (b.length != ((String) object).length()) {
@@ -173,9 +185,6 @@ public class PChar extends PDataType<String> {
 
     @Override
     public Object toObject(String value) {
-      if (value == null || value.length() == 0) {
-        throw newIllegalDataException(this + " may not be null");
-      }
       if (StringUtil.hasMultiByteChars(value)) {
         throw newIllegalDataException("CHAR types may only contain single byte characters (" + value + ")");
       }
